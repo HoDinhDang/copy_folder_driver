@@ -130,42 +130,116 @@ function extractFolderId(input) {
 // Delay helper
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Gọi API có exponential backoff thông minh tránh vượt quota của Google Drive
-async function driveApiCall(apiFn, { maxRetries = 8, jobId = null, actionName = '' } = {}) {
+// Gọi API cho các thao tác đọc/tạo thư mục (retry nhanh nếu lỗi mạng/rate-limit ngắn)
+async function driveApiCall(apiFn, { maxRetries = 3, jobId = null, actionName = '' } = {}) {
   let attempt = 0;
   while (attempt < maxRetries) {
     try {
       return await apiFn();
     } catch (err) {
       attempt++;
-      const msg = (err.message || '').toLowerCase();
-      const isRateLimit =
-        err.code === 403 ||
-        err.code === 429 ||
-        err.code === 500 ||
-        err.code === 503 ||
-        msg.includes('rate limit') ||
-        msg.includes('quota');
-
-      if (isRateLimit && attempt < maxRetries) {
-        // Nếu bị User rate limit exceeded, Google thường cần nghỉ 15s - 60s để mở khóa lại
-        const baseWait = msg.includes('rate limit') ? 10000 : 2000;
-        const delay = Math.min(baseWait * attempt + Math.random() * 2000, 90000);
-        const sec = Math.round(delay / 1000);
-        console.warn(`Drive API rate-limited (${actionName}), thử lại lần ${attempt}/${maxRetries} sau ${sec}s...`);
-        if (jobId) {
-          addJobLog(
-            jobId,
-            `⏳ Chạm giới hạn tốc độ Google Drive${actionName ? ` (${actionName})` : ''}, tự động tạm nghỉ ${sec}s rồi thử lại (lần ${attempt}/${maxRetries - 1})...`,
-            'warning'
-          );
-        }
+      const isTransient = err.code === 429 || err.code === 500 || err.code === 503;
+      if (isTransient && attempt < maxRetries) {
+        const delay = 2000 * attempt;
         await sleep(delay);
       } else {
         throw err;
       }
     }
   }
+}
+
+// Hàm copy 1 file thông minh với 3 cơ chế dự phòng (Không bị treo chờ lâu trên 1 file bị khóa)
+async function smartCopySingleFile(drive, item, dstFolderId, jobId) {
+  const quotaUser = `user_${jobId.slice(0, 16)}`;
+  const errors = [];
+
+  // Cơ chế 1: Server-side Copy trực tiếp (Nhanh nhất)
+  try {
+    await drive.files.copy({
+      fileId: item.id,
+      quotaUser,
+      supportsAllDrives: true,
+      requestBody: {
+        name: item.name,
+        parents: [dstFolderId]
+      },
+      fields: 'id, name, size'
+    });
+    return { method: 'Direct Copy' };
+  } catch (err1) {
+    const reason1 = err1?.errors?.[0]?.reason || err1.code || 'unknown';
+    errors.push(`Copy(${reason1}): ${err1.message}`);
+  }
+
+  // Cơ chế 2: Stream Download -> Upload (Vượt qua giới hạn files.copy của Google)
+  const isGoogleNativeApp = item.mimeType && item.mimeType.startsWith('application/vnd.google-apps.');
+  if (!isGoogleNativeApp) {
+    try {
+      const streamRes = await drive.files.get(
+        {
+          fileId: item.id,
+          alt: 'media',
+          acknowledgeAbuse: true,
+          supportsAllDrives: true,
+          quotaUser
+        },
+        { responseType: 'stream' }
+      );
+
+      await drive.files.create({
+        quotaUser,
+        supportsAllDrives: true,
+        requestBody: {
+          name: item.name,
+          parents: [dstFolderId]
+        },
+        media: {
+          mimeType: item.mimeType || 'application/octet-stream',
+          body: streamRes.data
+        },
+        fields: 'id'
+      });
+      return { method: 'Stream Copy' };
+    } catch (err2) {
+      const reason2 = err2?.errors?.[0]?.reason || err2.code || 'unknown';
+      errors.push(`Stream(${reason2}): ${err2.message}`);
+    }
+  }
+
+  // Cơ chế 3: Nếu là file Office (.xlsx, .docx, .pptx) bị khóa tải binary, thử convert sang Google Sheets/Docs khi copy
+  const lowerName = (item.name || '').toLowerCase();
+  let convertMime = null;
+  if (lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls') || lowerName.endsWith('.csv')) {
+    convertMime = 'application/vnd.google-apps.spreadsheet';
+  } else if (lowerName.endsWith('.docx') || lowerName.endsWith('.doc')) {
+    convertMime = 'application/vnd.google-apps.document';
+  } else if (lowerName.endsWith('.pptx') || lowerName.endsWith('.ppt')) {
+    convertMime = 'application/vnd.google-apps.presentation';
+  }
+
+  if (convertMime) {
+    try {
+      await drive.files.copy({
+        fileId: item.id,
+        quotaUser,
+        supportsAllDrives: true,
+        requestBody: {
+          name: item.name,
+          mimeType: convertMime,
+          parents: [dstFolderId]
+        },
+        fields: 'id'
+      });
+      return { method: 'Docs Convert' };
+    } catch (err3) {
+      const reason3 = err3?.errors?.[0]?.reason || err3.code || 'unknown';
+      errors.push(`Convert(${reason3}): ${err3.message}`);
+    }
+  }
+
+  const finalError = new Error(errors.join(' | '));
+  throw finalError;
 }
 
 // Escape chuỗi cho query của Google Drive
@@ -295,6 +369,7 @@ async function startCopyWorker(jobId) {
           () =>
             drive.files.list({
               q: `'${srcFolderId}' in parents and trashed = false`,
+              orderBy: 'folder,name',
               fields: 'nextPageToken, files(id, name, mimeType, size)',
               pageSize: 100,
               pageToken: pageToken,
@@ -338,7 +413,7 @@ async function startCopyWorker(jobId) {
               targetSubFolderId = newFolder.data.id;
               job.stats.totalFolders++;
               broadcastJobUpdate(jobId);
-              await sleep(500);
+              await sleep(400);
             }
 
             // Đệ quy vào thư mục con này
@@ -356,69 +431,26 @@ async function startCopyWorker(jobId) {
               continue;
             }
 
-            // Là tập tin -> Sử dụng files.copy (server-side copy trực tiếp của Google)
+            // Là tập tin -> Gọi smartCopySingleFile (thử 3 cơ chế: Direct Copy -> Stream -> Docs Convert)
             addJobLog(jobId, `[Copying] ${itemPath}...`, 'info');
             try {
-              await driveApiCall(
-                () =>
-                  drive.files.copy({
-                    fileId: item.id,
-                    requestBody: {
-                      name: item.name,
-                      parents: [dstFolderId]
-                    },
-                    supportsAllDrives: true,
-                    fields: 'id, name, size'
-                  }),
-                { jobId, actionName: item.name }
-              );
-
+              const copyRes = await smartCopySingleFile(drive, item, dstFolderId, jobId);
               job.stats.copiedFiles++;
               if (item.size) {
                 job.stats.copiedBytes += parseInt(item.size, 10) || 0;
               }
-              addJobLog(jobId, `✓ Đã copy: ${item.name}`, 'success');
+              addJobLog(jobId, `✓ Đã copy (${copyRes.method}): ${item.name}`, 'success');
             } catch (copyErr) {
-              // Dự phòng: Nếu files.copy vẫn bị chặn bởi rate limit với file thông thường, thử tải stream và upload stream
-              const isGoogleDoc = item.mimeType && item.mimeType.startsWith('application/vnd.google-apps.');
-              if (!isGoogleDoc) {
-                try {
-                  addJobLog(jobId, `🔄 Đang thử phương thức Stream dự phòng cho: ${item.name}...`, 'warning');
-                  await sleep(3000);
-                  const streamRes = await drive.files.get(
-                    { fileId: item.id, alt: 'media', supportsAllDrives: true },
-                    { responseType: 'stream' }
-                  );
-                  await drive.files.create({
-                    requestBody: {
-                      name: item.name,
-                      parents: [dstFolderId]
-                    },
-                    media: {
-                      mimeType: item.mimeType,
-                      body: streamRes.data
-                    },
-                    supportsAllDrives: true,
-                    fields: 'id'
-                  });
-                  job.stats.copiedFiles++;
-                  if (item.size) {
-                    job.stats.copiedBytes += parseInt(item.size, 10) || 0;
-                  }
-                  addJobLog(jobId, `✓ Đã copy (qua Stream): ${item.name}`, 'success');
-                } catch (streamErr) {
-                  job.stats.failedFiles++;
-                  addJobLog(jobId, `✗ Lỗi copy file ${item.name}: ${copyErr.message}`, 'error');
-                }
-              } else {
-                job.stats.failedFiles++;
-                addJobLog(jobId, `✗ Lỗi copy file ${item.name}: ${copyErr.message}`, 'error');
-              }
+              job.stats.failedFiles++;
+              addJobLog(
+                jobId,
+                `✗ Bỏ qua file bị Google khóa tải 24h (${item.name}): ${copyErr.message}`,
+                'error'
+              );
             }
 
             broadcastJobUpdate(jobId);
-            // Giãn cách 1.2 giây giữa mỗi lần tạo file để không chạm ngưỡng burst rate limit của Google Drive
-            await sleep(1200);
+            await sleep(800);
           }
         }
 
