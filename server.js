@@ -130,24 +130,72 @@ function extractFolderId(input) {
 // Delay helper
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Gọi API có exponential backoff tránh vượt quota 10 request/giây của Google Drive
-async function driveApiCall(apiFn, maxRetries = 5) {
+// Gọi API có exponential backoff thông minh tránh vượt quota của Google Drive
+async function driveApiCall(apiFn, { maxRetries = 8, jobId = null, actionName = '' } = {}) {
   let attempt = 0;
   while (attempt < maxRetries) {
     try {
       return await apiFn();
     } catch (err) {
       attempt++;
-      const isRateLimit = err.code === 403 || err.code === 429 || err.code === 500 || err.code === 503;
+      const msg = (err.message || '').toLowerCase();
+      const isRateLimit =
+        err.code === 403 ||
+        err.code === 429 ||
+        err.code === 500 ||
+        err.code === 503 ||
+        msg.includes('rate limit') ||
+        msg.includes('quota');
+
       if (isRateLimit && attempt < maxRetries) {
-        const delay = Math.pow(2, attempt) * 800 + Math.random() * 500;
-        console.warn(`Drive API rate-limited, thử lại lần ${attempt} sau ${Math.round(delay)}ms...`);
+        // Nếu bị User rate limit exceeded, Google thường cần nghỉ 15s - 60s để mở khóa lại
+        const baseWait = msg.includes('rate limit') ? 10000 : 2000;
+        const delay = Math.min(baseWait * attempt + Math.random() * 2000, 90000);
+        const sec = Math.round(delay / 1000);
+        console.warn(`Drive API rate-limited (${actionName}), thử lại lần ${attempt}/${maxRetries} sau ${sec}s...`);
+        if (jobId) {
+          addJobLog(
+            jobId,
+            `⏳ Chạm giới hạn tốc độ Google Drive${actionName ? ` (${actionName})` : ''}, tự động tạm nghỉ ${sec}s rồi thử lại (lần ${attempt}/${maxRetries - 1})...`,
+            'warning'
+          );
+        }
         await sleep(delay);
       } else {
         throw err;
       }
     }
   }
+}
+
+// Escape chuỗi cho query của Google Drive
+function escapeDriveQuery(str) {
+  return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+// Lấy danh sách các file/folder đã tồn tại trong thư mục đích để hỗ trợ Resume (chạy tiếp không copy trùng)
+async function getExistingChildrenMap(drive, folderId, jobId) {
+  const map = new Map(); // name -> { id, mimeType, size }
+  let pageToken = null;
+  do {
+    const res = await driveApiCall(
+      () =>
+        drive.files.list({
+          q: `'${folderId}' in parents and trashed = false`,
+          fields: 'nextPageToken, files(id, name, mimeType, size)',
+          pageSize: 100,
+          pageToken,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true
+        }),
+      { jobId }
+    );
+    for (const f of res.data.files || []) {
+      map.set(f.name, f);
+    }
+    pageToken = res.data.nextPageToken;
+  } while (pageToken);
+  return map;
 }
 
 // Tiến trình copy chạy nền (Background Worker)
@@ -173,37 +221,63 @@ async function startCopyWorker(jobId) {
     broadcastJobUpdate(jobId);
 
     // 1. Lấy thông tin thư mục nguồn
-    const sourceFolderMeta = await driveApiCall(() =>
-      drive.files.get({
-        fileId: job.sourceFolderId,
-        fields: 'id, name, mimeType',
-        supportsAllDrives: true
-      })
+    const sourceFolderMeta = await driveApiCall(
+      () =>
+        drive.files.get({
+          fileId: job.sourceFolderId,
+          fields: 'id, name, mimeType',
+          supportsAllDrives: true
+        }),
+      { jobId, actionName: 'Lấy thông tin thư mục nguồn' }
     );
 
     const sourceTitle = sourceFolderMeta.data.name || 'Thư mục không tên';
     addJobLog(jobId, `Đã tìm thấy thư mục nguồn: "${sourceTitle}"`, 'success');
 
-    // 2. Tạo thư mục gốc đích trên Drive của user
+    // 2. Kiểm tra hoặc tạo thư mục gốc đích trên Drive của user (Hỗ trợ chạy tiếp / Resume nếu đã có)
     const targetRootName = job.destFolderName || `[Bản sao] ${sourceTitle}`;
     const targetParent = job.destFolderId || 'root';
 
-    addJobLog(jobId, `Đang tạo thư mục đích "${targetRootName}" trên Drive của bạn...`, 'info');
-    const rootFolderCreate = await driveApiCall(() =>
-      drive.files.create({
-        requestBody: {
-          name: targetRootName,
-          mimeType: 'application/vnd.google-apps.folder',
-          parents: [targetParent]
-        },
-        supportsAllDrives: true,
-        fields: 'id, name, webViewLink'
-      })
+    const existingRootCheck = await driveApiCall(
+      () =>
+        drive.files.list({
+          q: `'${targetParent}' in parents and name = '${escapeDriveQuery(targetRootName)}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+          fields: 'files(id, name, webViewLink)',
+          pageSize: 1,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true
+        }),
+      { jobId }
     );
 
-    job.destCreatedFolderId = rootFolderCreate.data.id;
-    job.destFolderLink = rootFolderCreate.data.webViewLink;
-    addJobLog(jobId, `Thư mục đích đã tạo thành công! ID: ${rootFolderCreate.data.id}`, 'success');
+    if (existingRootCheck.data.files && existingRootCheck.data.files.length > 0) {
+      const existingFolder = existingRootCheck.data.files[0];
+      job.destCreatedFolderId = existingFolder.id;
+      job.destFolderLink = existingFolder.webViewLink;
+      addJobLog(
+        jobId,
+        `♻️ Phát hiện thư mục đích "${targetRootName}" đã có sẵn. Hệ thống sẽ tự động bỏ qua các file đã copy và chỉ copy bù các file còn thiếu!`,
+        'info'
+      );
+    } else {
+      addJobLog(jobId, `Đang tạo thư mục đích "${targetRootName}" trên Drive của bạn...`, 'info');
+      const rootFolderCreate = await driveApiCall(
+        () =>
+          drive.files.create({
+            requestBody: {
+              name: targetRootName,
+              mimeType: 'application/vnd.google-apps.folder',
+              parents: [targetParent]
+            },
+            supportsAllDrives: true,
+            fields: 'id, name, webViewLink'
+          }),
+        { jobId, actionName: 'Tạo thư mục gốc' }
+      );
+      job.destCreatedFolderId = rootFolderCreate.data.id;
+      job.destFolderLink = rootFolderCreate.data.webViewLink;
+      addJobLog(jobId, `Thư mục đích đã tạo thành công! ID: ${rootFolderCreate.data.id}`, 'success');
+    }
     broadcastJobUpdate(jobId);
 
     // 3. Hàm đệ quy duyệt và copy
@@ -212,17 +286,22 @@ async function startCopyWorker(jobId) {
         throw new Error('Tiến trình đã bị người dùng hủy!');
       }
 
+      // Lấy danh sách file/folder đã có trong thư mục đích này để tránh copy lại file đã có
+      const existingChildren = await getExistingChildrenMap(drive, dstFolderId, jobId);
+
       let pageToken = null;
       do {
-        const res = await driveApiCall(() =>
-          drive.files.list({
-            q: `'${srcFolderId}' in parents and trashed = false`,
-            fields: 'nextPageToken, files(id, name, mimeType, size)',
-            pageSize: 100,
-            pageToken: pageToken,
-            supportsAllDrives: true,
-            includeItemsFromAllDrives: true
-          })
+        const res = await driveApiCall(
+          () =>
+            drive.files.list({
+              q: `'${srcFolderId}' in parents and trashed = false`,
+              fields: 'nextPageToken, files(id, name, mimeType, size)',
+              pageSize: 100,
+              pageToken: pageToken,
+              supportsAllDrives: true,
+              includeItemsFromAllDrives: true
+            }),
+          { jobId }
         );
 
         const items = res.data.files || [];
@@ -235,38 +314,63 @@ async function startCopyWorker(jobId) {
           const itemPath = currentPath ? `${currentPath}/${item.name}` : item.name;
 
           if (item.mimeType === 'application/vnd.google-apps.folder') {
-            // Là thư mục con -> tạo thư mục trên Drive đích
-            addJobLog(jobId, `[Thư mục] Tạo: ${itemPath}`, 'info');
-            const newFolder = await driveApiCall(() =>
-              drive.files.create({
-                requestBody: {
-                  name: item.name,
-                  mimeType: 'application/vnd.google-apps.folder',
-                  parents: [dstFolderId]
-                },
-                supportsAllDrives: true,
-                fields: 'id'
-              })
-            );
-            job.stats.totalFolders++;
-            broadcastJobUpdate(jobId);
+            // Kiểm tra xem thư mục con đã tồn tại chưa
+            let targetSubFolderId = null;
+            const existingSub = existingChildren.get(item.name);
+            if (existingSub && existingSub.mimeType === 'application/vnd.google-apps.folder') {
+              targetSubFolderId = existingSub.id;
+              addJobLog(jobId, `[Thư mục] Đã có sẵn, duyệt tiếp: ${itemPath}`, 'info');
+            } else {
+              addJobLog(jobId, `[Thư mục] Tạo: ${itemPath}`, 'info');
+              const newFolder = await driveApiCall(
+                () =>
+                  drive.files.create({
+                    requestBody: {
+                      name: item.name,
+                      mimeType: 'application/vnd.google-apps.folder',
+                      parents: [dstFolderId]
+                    },
+                    supportsAllDrives: true,
+                    fields: 'id'
+                  }),
+                { jobId, actionName: item.name }
+              );
+              targetSubFolderId = newFolder.data.id;
+              job.stats.totalFolders++;
+              broadcastJobUpdate(jobId);
+              await sleep(500);
+            }
 
             // Đệ quy vào thư mục con này
-            await copyDirectoryRecursive(item.id, newFolder.data.id, itemPath);
+            await copyDirectoryRecursive(item.id, targetSubFolderId, itemPath);
           } else {
+            // Kiểm tra nếu file đã được copy trước đó rồi thì bỏ qua
+            const existingFile = existingChildren.get(item.name);
+            if (existingFile && existingFile.mimeType !== 'application/vnd.google-apps.folder') {
+              job.stats.copiedFiles++;
+              if (item.size) {
+                job.stats.copiedBytes += parseInt(item.size, 10) || 0;
+              }
+              addJobLog(jobId, `⏭️ Đã tồn tại, bỏ qua: ${item.name}`, 'info');
+              broadcastJobUpdate(jobId);
+              continue;
+            }
+
             // Là tập tin -> Sử dụng files.copy (server-side copy trực tiếp của Google)
             addJobLog(jobId, `[Copying] ${itemPath}...`, 'info');
             try {
-              await driveApiCall(() =>
-                drive.files.copy({
-                  fileId: item.id,
-                  requestBody: {
-                    name: item.name,
-                    parents: [dstFolderId]
-                  },
-                  supportsAllDrives: true,
-                  fields: 'id, name, size'
-                })
+              await driveApiCall(
+                () =>
+                  drive.files.copy({
+                    fileId: item.id,
+                    requestBody: {
+                      name: item.name,
+                      parents: [dstFolderId]
+                    },
+                    supportsAllDrives: true,
+                    fields: 'id, name, size'
+                  }),
+                { jobId, actionName: item.name }
               );
 
               job.stats.copiedFiles++;
@@ -275,13 +379,46 @@ async function startCopyWorker(jobId) {
               }
               addJobLog(jobId, `✓ Đã copy: ${item.name}`, 'success');
             } catch (copyErr) {
-              job.stats.failedFiles++;
-              addJobLog(jobId, `✗ Lỗi copy file ${item.name}: ${copyErr.message}`, 'error');
+              // Dự phòng: Nếu files.copy vẫn bị chặn bởi rate limit với file thông thường, thử tải stream và upload stream
+              const isGoogleDoc = item.mimeType && item.mimeType.startsWith('application/vnd.google-apps.');
+              if (!isGoogleDoc) {
+                try {
+                  addJobLog(jobId, `🔄 Đang thử phương thức Stream dự phòng cho: ${item.name}...`, 'warning');
+                  await sleep(3000);
+                  const streamRes = await drive.files.get(
+                    { fileId: item.id, alt: 'media', supportsAllDrives: true },
+                    { responseType: 'stream' }
+                  );
+                  await drive.files.create({
+                    requestBody: {
+                      name: item.name,
+                      parents: [dstFolderId]
+                    },
+                    media: {
+                      mimeType: item.mimeType,
+                      body: streamRes.data
+                    },
+                    supportsAllDrives: true,
+                    fields: 'id'
+                  });
+                  job.stats.copiedFiles++;
+                  if (item.size) {
+                    job.stats.copiedBytes += parseInt(item.size, 10) || 0;
+                  }
+                  addJobLog(jobId, `✓ Đã copy (qua Stream): ${item.name}`, 'success');
+                } catch (streamErr) {
+                  job.stats.failedFiles++;
+                  addJobLog(jobId, `✗ Lỗi copy file ${item.name}: ${copyErr.message}`, 'error');
+                }
+              } else {
+                job.stats.failedFiles++;
+                addJobLog(jobId, `✗ Lỗi copy file ${item.name}: ${copyErr.message}`, 'error');
+              }
             }
 
             broadcastJobUpdate(jobId);
-            // Delay nhẹ 150ms để tôn trọng quota API
-            await sleep(150);
+            // Giãn cách 1.2 giây giữa mỗi lần tạo file để không chạm ngưỡng burst rate limit của Google Drive
+            await sleep(1200);
           }
         }
 
