@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cloud Drive Copier - Sao chép Google Drive Chạy Ngầm</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="header">
+      <div class="logo-area">
+        <div class="logo-icon">⚡</div>
+        <div>
+          <h1>Cloud Drive Copier</h1>
+          <p class="subtitle">Sao chép Google Drive siêu tốc qua Cloud API (Tắt máy vẫn chạy 24/7)</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="btnOpenDocs" class="btn btn-outline" title="Hướng dẫn thiết lập chạy tắt máy">📖 Hướng dẫn tắt máy vẫn chạy</button>
+        <button id="btnOpenSettings" class="btn btn-outline">⚙️ Cấu hình API</button>
+      </div>
+    </header>
+
+    <!-- Main Grid -->
+    <main class="main-content">
+      <!-- Left Column: Form & Connection -->
+      <section class="card config-card">
+        <!-- Account Status Box -->
+        <div id="authStatusBox" class="status-box not-connected">
+          <div class="status-indicator"></div>
+          <div class="status-info">
+            <span class="status-title" id="authTitle">Chưa kết nối tài khoản Drive đích</span>
+            <span class="status-desc" id="authDesc">Vui lòng đăng nhập Google để cấp quyền copy file vào Drive của bạn.</span>
+          </div>
+          <div class="auth-buttons">
+            <a id="btnConnectGoogle" href="/api/auth/google" class="btn btn-primary btn-sm">🔗 Đăng nhập Google</a>
+            <button id="btnLogoutGoogle" class="btn btn-danger btn-sm" style="display: none;">Đăng xuất</button>
+          </div>
+        </div>
+
+        <!-- Form Copy -->
+        <form id="copyForm" class="copy-form">
+          <div class="form-group">
+            <label for="sourceUrl">
+              <span>Link thư mục Google Drive NGUỒN:</span>
+              <span class="badge">Bắt buộc</span>
+            </label>
+            <input 
+              type="text" 
+              id="sourceUrl" 
+              placeholder="https://drive.google.com/drive/folders/..." 
+              value="https://drive.google.com/drive/u/0/folders/1eEWmqXZZmDXx4QsmsTsnjkgUMp7pe6EH" 
+              required
+            >
+            <small class="helper-text">Hỗ trợ cả link công khai, link chia sẻ hoặc ID thư mục.</small>
+          </div>
+
+          <div class="form-group">
+            <label for="destFolderName">
+              <span>Tên thư mục mới trên Drive của bạn:</span>
+              <span class="badge optional">Tùy chọn</span>
+            </label>
+            <input 
+              type="text" 
+              id="destFolderName" 
+              placeholder="Để trống sẽ tự động lấy theo tên thư mục gốc"
+            >
+          </div>
+
+          <div class="form-group">
+            <label for="destFolderId">
+              <span>ID thư mục cha lưu trữ trên Drive của bạn:</span>
+              <span class="badge optional">Tùy chọn</span>
+            </label>
+            <input 
+              type="text" 
+              id="destFolderId" 
+              placeholder="Để trống sẽ lưu trực tiếp vào Drive của tôi (Root)"
+            >
+            <small class="helper-text">Nếu muốn lưu vào một thư mục cụ thể có sẵn trên Drive, dán link/ID thư mục đó vào đây.</small>
+          </div>
+
+          <div class="info-alert">
+            <div class="alert-icon">💡</div>
+            <div>
+              <strong>Cơ chế Cloud Server-Side:</strong> Tập tin được Google nhân bản trực tiếp giữa các Data Center, không tốn dung lượng download của máy tính và <strong>hoàn toàn có thể tắt máy / tắt trình duyệt</strong> sau khi bấm bắt đầu!
+            </div>
+          </div>
+
+          <button type="submit" id="btnStartCopy" class="btn btn-success btn-block btn-lg">
+            🚀 Bắt đầu Sao Chép Ngay
+          </button>
+        </form>
+      </section>
+
+      <!-- Right Column: Active Task Progress & Live Logs -->
+      <section class="card progress-card">
+        <div class="card-header">
+          <h2>📊 Tiến trình Sao chép Hiện tại</h2>
+          <span id="jobBadgeStatus" class="badge-status status-idle">Sẵn sàng</span>
+        </div>
+
+        <div id="noJobPlaceholder" class="placeholder-box">
+          <div class="placeholder-icon">📂</div>
+          <p>Chưa có tiến trình nào đang chạy.</p>
+          <small>Nhập link Drive nguồn bên trái và nhấn "Bắt đầu Sao Chép" để thực thi.</small>
+        </div>
+
+        <div id="activeJobContainer" class="job-container" style="display: none;">
+          <!-- Metrics Cards -->
+          <div class="metrics-grid">
+            <div class="metric-box">
+              <span class="metric-num" id="statFiles">0</span>
+              <span class="metric-label">Files đã copy</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-num" id="statFolders">0</span>
+              <span class="metric-label">Thư mục đã tạo</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-num" id="statSize">0 MB</span>
+              <span class="metric-label">Dung lượng</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-num" id="statErrors">0</span>
+              <span class="metric-label">Lỗi</span>
+            </div>
+          </div>
+
+          <!-- Action bar for Job -->
+          <div class="job-action-bar">
+            <a id="btnOpenTargetDrive" href="#" target="_blank" class="btn btn-outline btn-sm" style="display: none;">
+              ↗️ Mở thư mục đích trên Drive
+            </a>
+            <button id="btnCancelJob" class="btn btn-danger btn-sm">🛑 Hủy tiến trình</button>
+          </div>
+
+          <!-- Console Log View -->
+          <div class="console-wrapper">
+            <div class="console-header">
+              <span>Nhật ký chạy ngầm (Realtime Log)</span>
+              <button id="btnClearLog" class="btn-link">Xóa log</button>
+            </div>
+            <div id="logContainer" class="console-body">
+              <div class="log-line log-info">[Hệ thống] Đang chờ tác vụ...</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- History section -->
+    <section class="card history-card">
+      <div class="card-header">
+        <h3>📜 Lịch sử các lần sao chép</h3>
+        <button id="btnRefreshJobs" class="btn btn-outline btn-sm">🔄 Làm mới</button>
+      </div>
+      <div class="table-responsive">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Thời gian</th>
+              <th>Thư mục nguồn</th>
+              <th>Trạng thái</th>
+              <th>Kết quả</th>
+              <th>Thư mục đích</th>
+              <th>Hành động</th>
+            </tr>
+          </thead>
+          <tbody id="jobsTableBody">
+            <tr>
+              <td colspan="6" class="text-center">Chưa có lịch sử sao chép</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Modal Cấu hình Google API Credentials -->
+    <div id="modalSettings" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>⚙️ Cấu hình Google OAuth 2.0 Credentials</h3>
+          <span class="modal-close" id="btnCloseSettings">&times;</span>
+        </div>
+        <div class="modal-body">
+          <p>Để ứng dụng kết nối trực tiếp đến Google Drive của bạn, bạn cần tạo một <strong>OAuth Client ID</strong> (Web Application) trên Google Cloud Console.</p>
+          <ol class="setup-steps">
+            <li>Vào <a href="https://console.cloud.google.com/apis/credentials" target="_blank">Google Cloud Console API & Services</a>.</li>
+            <li>Tạo project mới hoặc chọn project có sẵn, bật <strong>Google Drive API</strong>.</li>
+            <li>Vào mục <strong>Credentials</strong> &gt; <strong>Create Credentials</strong> &gt; <strong>OAuth Client ID</strong>.</li>
+            <li>Chọn loại <strong>Web application</strong>.</li>
+            <li>Tại mục <strong>Authorized redirect URIs</strong>, thêm: <br><code id="currentRedirectUri">http://localhost:3000/api/auth/google/callback</code></li>
+            <li>Dán <strong>Client ID</strong> và <strong>Client Secret</strong> vào bên dưới:</li>
+          </ol>
+          <div class="form-group">
+            <label>Client ID:</label>
+            <input type="text" id="cfgClientId" placeholder="ví dụ: 123456789-abc.apps.googleusercontent.com">
+          </div>
+          <div class="form-group">
+            <label>Client Secret:</label>
+            <input type="password" id="cfgClientSecret" placeholder="ví dụ: GOCSPX-xxxxxxxxxxxxx">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="btnSaveConfig" class="btn btn-primary">Lưu cấu hình</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal Hướng dẫn chạy 24/7 (Tắt máy vẫn chạy) -->
+    <div id="modalDocs" class="modal">
+      <div class="modal-content modal-lg">
+        <div class="modal-header">
+          <h3>☁️ Hướng Dẫn Tắt Máy Mà Vẫn Hoạt Động (Cloud Execution)</h3>
+          <span class="modal-close" id="btnCloseDocs">&times;</span>
+        </div>
+        <div class="modal-body">
+          <div class="doc-box">
+            <h4>Cách 1: Triển khai Web App lên Cloud Miễn Phí (Khuyên dùng - Render / Railway)</h4>
+            <p>Trang web này đã được tích hợp sẵn <code>render.yaml</code> và <code>Dockerfile</code> để bạn đưa lên Cloud chỉ trong 2 phút:</p>
+            <ol>
+              <li>Đưa mã nguồn thư mục này lên GitHub cá nhân của bạn.</li>
+              <li>Đăng nhập vào <a href="https://render.com" target="_blank">Render.com</a> (miễn phí).</li>
+              <li>Chọn <strong>New Web Service</strong> &gt; Chọn GitHub repo vừa tạo.</li>
+              <li>Tại mục cấu hình môi trường (Environment Variables), thêm <code>GOOGLE_CLIENT_ID</code> và <code>GOOGLE_CLIENT_SECRET</code>.</li>
+              <li>Bấm <strong>Deploy</strong>! Bạn sẽ có một đường link web cá nhân (ví dụ: <code>https://my-drive-copier.onrender.com</code>). Khi đó bạn bấm copy rồi <strong>tắt máy tính đi ngủ</strong>, máy chủ Render sẽ tự động chạy ngầm cho đến khi xong toàn bộ dữ liệu!</li>
+            </ol>
+          </div>
+
+          <div class="doc-box" style="margin-top: 15px;">
+            <h4>Cách 2: Google Apps Script (100% Máy chủ Google, Không cần server riêng)</h4>
+            <p>Chúng tôi đã đính kèm sẵn mã nguồn tại thư mục <code>google-apps-script/</code>:</p>
+            <ol>
+              <li>Truy cập <a href="https://script.google.com" target="_blank">Google Apps Script</a> &gt; Bấm <strong>New project</strong>.</li>
+              <li>Copy nội dung file <code>google-apps-script/Code.gs</code> vào trình soạn thảo.</li>
+              <li>Bấm <strong>Deploy</strong> &gt; <strong>New deployment</strong> &gt; Chọn type <strong>Web App</strong>.</li>
+              <li>Chọn "Execute as: Me" và "Who has access: Anyone".</li>
+              <li>Bạn sẽ nhận được ngay 1 link trang web chạy trực tiếp 100% trên server của Google!</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

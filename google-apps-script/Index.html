@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <title>Google Drive Cloud Copier</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      padding: 30px 20px;
+      display: flex;
+      justify-content: center;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 30px;
+      max-width: 650px;
+      width: 100%;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+    }
+    h2 {
+      margin-top: 0;
+      color: #38bdf8;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    p {
+      color: #94a3b8;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+    .form-group {
+      margin-top: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    label {
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+    input {
+      background: #0b1120;
+      border: 1px solid #334155;
+      color: #f8fafc;
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 1rem;
+    }
+    input:focus {
+      outline: none;
+      border-color: #38bdf8;
+    }
+    .btn {
+      background: #0284c7;
+      color: white;
+      border: none;
+      padding: 14px;
+      border-radius: 8px;
+      font-weight: bold;
+      font-size: 1.05rem;
+      cursor: pointer;
+      margin-top: 20px;
+      width: 100%;
+      transition: background 0.2s;
+    }
+    .btn:hover {
+      background: #0369a1;
+    }
+    .btn:disabled {
+      background: #475569;
+      cursor: not-allowed;
+    }
+    .console {
+      background: #050811;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 14px;
+      margin-top: 20px;
+      height: 200px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 0.85rem;
+      color: #cbd5e1;
+      display: none;
+    }
+    .result-box {
+      margin-top: 20px;
+      padding: 16px;
+      background: rgba(16, 185, 129, 0.1);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      border-radius: 8px;
+      display: none;
+    }
+    .result-box a {
+      color: #34d399;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>⚡ Google Drive Cloud Copier</h2>
+    <p>Chạy trực tiếp 100% trên hạ tầng Google Cloud của bạn. Bạn có thể <strong>tắt máy tính</strong> ngay sau khi bấm chạy!</p>
+    
+    <div class="form-group">
+      <label>Link thư mục Google Drive NGUỒN:</label>
+      <input type="text" id="sourceUrl" value="https://drive.google.com/drive/u/0/folders/1eEWmqXZZmDXx4QsmsTsnjkgUMp7pe6EH">
+    </div>
+
+    <div class="form-group">
+      <label>Tên thư mục mới trên Drive của bạn (tùy chọn):</label>
+      <input type="text" id="destFolderName" placeholder="Để trống sẽ tự động lấy tên thư mục gốc">
+    </div>
+
+    <button id="btnStart" class="btn" onclick="startCopy()">🚀 Bắt đầu Sao chép sang Drive của tôi</button>
+
+    <div id="resultBox" class="result-box"></div>
+    <div id="consoleLog" class="console"></div>
+  </div>
+
+  <script>
+    function startCopy() {
+      var sourceUrl = document.getElementById('sourceUrl').value.trim();
+      var destFolderName = document.getElementById('destFolderName').value.trim();
+      var btn = document.getElementById('btnStart');
+      var consoleBox = document.getElementById('consoleLog');
+      var resultBox = document.getElementById('resultBox');
+
+      if (!sourceUrl) {
+        alert('Vui lòng nhập link thư mục nguồn!');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerText = '⏳ Đang xử lý sao chép trên Google Cloud...';
+      consoleBox.style.display = 'block';
+      consoleBox.innerHTML = '<div>[Bắt đầu] Đang kết nối Drive và sao chép dữ liệu...</div>';
+      resultBox.style.display = 'none';
+
+      google.script.run
+        .withSuccessHandler(function(res) {
+          btn.disabled = false;
+          btn.innerText = '🚀 Bắt đầu Sao chép sang Drive của tôi';
+
+          if (res.success) {
+            resultBox.style.display = 'block';
+            resultBox.innerHTML = '🎉 <strong>Đã sao chép thành công ' + res.copiedFiles + ' files (' + res.totalFolders + ' thư mục)!</strong><br><br>' +
+              '<a href="' + res.destFolderUrl + '" target="_blank">👉 Mở thư mục đích trên Google Drive của bạn</a>';
+
+            consoleBox.innerHTML += res.logs.map(function(l) { return '<div>' + l + '</div>'; }).join('');
+            consoleBox.scrollTop = consoleBox.scrollHeight;
+          } else {
+            alert('Lỗi: ' + res.error);
+            consoleBox.innerHTML += '<div style="color:#f87171;">Lỗi: ' + res.error + '</div>';
+          }
+        })
+        .withFailureHandler(function(err) {
+          btn.disabled = false;
+          btn.innerText = '🚀 Bắt đầu Sao chép sang Drive của tôi';
+          alert('Lỗi gọi script: ' + err.message);
+          consoleBox.innerHTML += '<div style="color:#f87171;">Lỗi hệ thống: ' + err.message + '</div>';
+        })
+        .startCopyProcess(sourceUrl, destFolderName);
+    }
+  </script>
+</body>
+</html>

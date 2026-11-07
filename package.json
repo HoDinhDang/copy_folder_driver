@@ -1,0 +1,17 @@
+{
+  "name": "drive-to-drive-copy",
+  "version": "1.0.0",
+  "description": "Web app sao chép dữ liệu giữa các Google Drive chạy nền trên Cloud (tắt máy vẫn chạy)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "googleapis": "^144.0.0",
+    "uuid": "^11.1.0"
+  }
+}
