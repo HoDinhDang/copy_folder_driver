@@ -82,7 +82,8 @@ async function checkAuthStatus() {
       isAuthenticated = false;
       authStatusBox.className = 'status-box not-connected';
       authTitle.textContent = 'Chưa đăng nhập Google Drive';
-      authDesc.textContent = 'Nhấn nút "Đăng nhập Google" để liên kết Drive của bạn.';
+      const redirectUri = `${window.location.origin}/api/auth/google/callback`;
+      authDesc.innerHTML = `Nhấn "Đăng nhập Google". Lưu ý thêm Redirect URI này vào Google Cloud:<br><code style="color:#38bdf8;user-select:all;">${redirectUri}</code>`;
       btnConnectGoogle.style.display = 'inline-flex';
       btnLogoutGoogle.style.display = 'none';
     }
@@ -95,6 +96,7 @@ async function checkAuthStatus() {
 btnSaveConfig.addEventListener('click', async () => {
   const clientId = cfgClientId.value.trim();
   const clientSecret = cfgClientSecret.value.trim();
+  const redirectUri = `${window.location.origin}/api/auth/google/callback`;
 
   if (!clientId || !clientSecret) {
     alert('Vui lòng điền đầy đủ Client ID và Client Secret!');
@@ -105,7 +107,7 @@ btnSaveConfig.addEventListener('click', async () => {
     const res = await fetch('/api/auth/save-credentials', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientId, clientSecret })
+      body: JSON.stringify({ clientId, clientSecret, redirectUri })
     });
     const result = await res.json();
     if (result.success) {

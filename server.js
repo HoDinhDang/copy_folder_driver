@@ -44,12 +44,24 @@ function saveJson(file, data) {
   }
 }
 
+// Tự động xác định Redirect URI từ request (hỗ trợ cả localhost và Render/Cloud)
+function getRedirectUriFromReq(req) {
+  if (!req) return null;
+  const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+  const host = (req.headers['x-forwarded-host'] || req.get('host') || `localhost:${PORT}`).split(',')[0].trim();
+  return `${proto}://${host}/api/auth/google/callback`;
+}
+
 // Lấy OAuth2 Client
-function getOAuth2Client() {
+function getOAuth2Client(req = null) {
   const config = loadJson(CONFIG_FILE, {});
   const clientId = process.env.GOOGLE_CLIENT_ID || config.clientId;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET || config.clientSecret;
-  const redirectUri = process.env.GOOGLE_REDIRECT_URI || config.redirectUri || `http://localhost:${PORT}/api/auth/google/callback`;
+  const redirectUri =
+    process.env.GOOGLE_REDIRECT_URI ||
+    getRedirectUriFromReq(req) ||
+    config.redirectUri ||
+    `http://localhost:${PORT}/api/auth/google/callback`;
 
   if (!clientId || !clientSecret) {
     return null;
@@ -304,28 +316,30 @@ app.get('/api/auth/status', async (req, res) => {
   const tokens = loadJson(TOKENS_FILE, null);
   const clientId = process.env.GOOGLE_CLIENT_ID || config.clientId;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET || config.clientSecret;
+  const expectedRedirectUri = process.env.GOOGLE_REDIRECT_URI || getRedirectUriFromReq(req) || config.redirectUri;
 
   if (!clientId || !clientSecret) {
-    return res.json({ configured: false, authenticated: false });
+    return res.json({ configured: false, authenticated: false, redirectUri: expectedRedirectUri });
   }
 
   if (!tokens) {
-    return res.json({ configured: true, authenticated: false, clientId });
+    return res.json({ configured: true, authenticated: false, clientId, redirectUri: expectedRedirectUri });
   }
 
   try {
-    const oauth2Client = getOAuth2Client();
+    const oauth2Client = getOAuth2Client(req);
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
     const about = await drive.about.get({ fields: 'user, storageQuota' });
     return res.json({
       configured: true,
       authenticated: true,
       user: about.data.user,
-      storageQuota: about.data.storageQuota
+      storageQuota: about.data.storageQuota,
+      redirectUri: expectedRedirectUri
     });
   } catch (err) {
     console.error('Token expired or invalid:', err.message);
-    return res.json({ configured: true, authenticated: false, error: err.message });
+    return res.json({ configured: true, authenticated: false, error: err.message, redirectUri: expectedRedirectUri });
   }
 });
 
@@ -349,7 +363,7 @@ app.post('/api/auth/save-credentials', (req, res) => {
 
 // Chuyển hướng đăng nhập Google OAuth 2.0
 app.get('/api/auth/google', (req, res) => {
-  const oauth2Client = getOAuth2Client();
+  const oauth2Client = getOAuth2Client(req);
   if (!oauth2Client) {
     return res.status(400).send('Chưa cấu hình Google Client ID và Client Secret. Vui lòng thiết lập trên giao diện trước!');
   }
@@ -378,7 +392,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
   }
 
   try {
-    const oauth2Client = getOAuth2Client();
+    const oauth2Client = getOAuth2Client(req);
     const { tokens } = await oauth2Client.getToken(code);
     saveJson(TOKENS_FILE, tokens);
     res.redirect('/?auth=success');
