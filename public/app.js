@@ -53,6 +53,35 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+// Lưu & khôi phục các ô nhập trên giao diện qua localStorage
+function saveFormToLocal() {
+  try {
+    localStorage.setItem('dc_sourceUrl', sourceUrlInput.value);
+    localStorage.setItem('dc_destFolderName', destFolderNameInput.value);
+    localStorage.setItem('dc_destFolderId', destFolderIdInput.value);
+  } catch (e) {}
+}
+
+function restoreFormFromLocal() {
+  try {
+    const sUrl = localStorage.getItem('dc_sourceUrl');
+    const dName = localStorage.getItem('dc_destFolderName');
+    const dId = localStorage.getItem('dc_destFolderId');
+    if (sUrl !== null && sUrl !== '') sourceUrlInput.value = sUrl;
+    if (dName !== null) destFolderNameInput.value = dName;
+    if (dId !== null) destFolderIdInput.value = dId;
+
+    const savedClientId = localStorage.getItem('dc_clientId');
+    const savedClientSecret = localStorage.getItem('dc_clientSecret');
+    if (savedClientId) cfgClientId.value = savedClientId;
+    if (savedClientSecret) cfgClientSecret.value = savedClientSecret;
+  } catch (e) {}
+}
+
+sourceUrlInput.addEventListener('input', saveFormToLocal);
+destFolderNameInput.addEventListener('input', saveFormToLocal);
+destFolderIdInput.addEventListener('input', saveFormToLocal);
+
 // Kiểm tra Auth Status
 async function checkAuthStatus() {
   try {
@@ -60,6 +89,19 @@ async function checkAuthStatus() {
     const data = await res.json();
 
     if (!data.configured) {
+      // Nếu trình duyệt có lưu sẵn Client ID & Secret, tự động đồng bộ lại lên server
+      const savedClientId = localStorage.getItem('dc_clientId');
+      const savedClientSecret = localStorage.getItem('dc_clientSecret');
+      if (savedClientId && savedClientSecret) {
+        const redirectUri = `${window.location.origin}/api/auth/google/callback`;
+        await fetch('/api/auth/save-credentials', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clientId: savedClientId, clientSecret: savedClientSecret, redirectUri })
+        });
+        return checkAuthStatus();
+      }
+
       authStatusBox.className = 'status-box not-connected';
       authTitle.textContent = 'Chưa cấu hình Google OAuth Client';
       authDesc.textContent = 'Vui lòng bấm nút "Cấu hình API" ở góc trên để nhập Client ID & Secret từ Google Cloud.';
@@ -102,6 +144,11 @@ btnSaveConfig.addEventListener('click', async () => {
     alert('Vui lòng điền đầy đủ Client ID và Client Secret!');
     return;
   }
+
+  try {
+    localStorage.setItem('dc_clientId', clientId);
+    localStorage.setItem('dc_clientSecret', clientSecret);
+  } catch (e) {}
 
   try {
     const res = await fetch('/api/auth/save-credentials', {
@@ -241,6 +288,20 @@ function renderJobState(job) {
     ).join('');
     logContainer.scrollTop = logContainer.scrollHeight;
   }
+
+  // Cập nhật trực tiếp dòng tương ứng ở bảng Lịch sử bên dưới theo thời gian thực
+  const rowStatus = document.getElementById(`job-status-${job.id}`);
+  const rowResult = document.getElementById(`job-result-${job.id}`);
+  const rowLink = document.getElementById(`job-link-${job.id}`);
+  if (rowStatus) {
+    rowStatus.innerHTML = `<span class="badge-status status-${job.status}">${job.status}</span>`;
+  }
+  if (rowResult) {
+    rowResult.textContent = `${job.stats.copiedFiles} files (${formatBytes(job.stats.copiedBytes)})`;
+  }
+  if (rowLink && job.destFolderLink) {
+    rowLink.innerHTML = `<a href="${job.destFolderLink}" target="_blank" class="btn-link">Mở thư mục ↗</a>`;
+  }
 }
 
 // Hủy Job
@@ -283,22 +344,32 @@ async function loadJobsHistory() {
       const actionBtn = `<button class="btn btn-outline btn-sm" onclick="trackJob('${j.id}')">Xem</button>`;
 
       return `
-        <tr>
+        <tr id="job-row-${j.id}">
           <td>${timeStr}</td>
           <td><code>${escapeHtml(j.sourceFolderId)}</code></td>
-          <td>${badge}</td>
-          <td>${resultText}</td>
-          <td>${linkDrive}</td>
+          <td id="job-status-${j.id}">${badge}</td>
+          <td id="job-result-${j.id}">${resultText}</td>
+          <td id="job-link-${j.id}">${linkDrive}</td>
           <td>${actionBtn}</td>
         </tr>
       `;
     }).join('');
 
-    // Nếu chưa track job nào và có job đang chạy -> tự động track job mới nhất
+    // Tự động hiển thị tiến trình đang chạy hoặc tiến trình gần nhất khi mở lại trang
     if (!currentJobId) {
-      const activeJob = jobsList.find(j => j.status === 'running' || j.status === 'pending');
-      if (activeJob) {
-        trackJob(activeJob.id);
+      const targetJob = jobsList.find(j => j.status === 'running' || j.status === 'pending') || jobsList[0];
+      if (targetJob) {
+        trackJob(targetJob.id);
+        // Khôi phục thông tin form từ job nếu người dùng chưa lưu vào localStorage
+        if (!localStorage.getItem('dc_sourceUrl') && targetJob.sourceUrlOrId) {
+          sourceUrlInput.value = targetJob.sourceUrlOrId;
+        }
+        if (!localStorage.getItem('dc_destFolderName') && targetJob.destFolderName) {
+          destFolderNameInput.value = targetJob.destFolderName;
+        }
+        if (!localStorage.getItem('dc_destFolderId') && targetJob.destFolderId) {
+          destFolderIdInput.value = targetJob.destFolderId;
+        }
       }
     }
   } catch (err) {
@@ -327,6 +398,8 @@ function escapeHtml(str) {
 
 // Khởi chạy
 window.addEventListener('DOMContentLoaded', () => {
+  restoreFormFromLocal();
+
   // Bắt query param ?auth=success
   const urlParams = new URLSearchParams(window.location.search);
   if (urlParams.get('auth') === 'success') {

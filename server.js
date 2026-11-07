@@ -588,12 +588,14 @@ app.post('/api/jobs', (req, res) => {
     return res.status(400).json({ error: 'Không nhận diện được link hoặc ID thư mục nguồn hợp lệ.' });
   }
 
+  const parsedDestParentId = destFolderId ? (extractFolderId(destFolderId) || destFolderId.trim()) : null;
+
   const jobId = uuidv4();
   const newJob = {
     id: jobId,
     sourceFolderId: folderId,
     sourceUrlOrId,
-    destFolderId: destFolderId ? destFolderId.trim() : null,
+    destFolderId: parsedDestParentId,
     destFolderName: destFolderName ? destFolderName.trim() : null,
     destCreatedFolderId: null,
     destFolderLink: null,
@@ -619,6 +621,29 @@ app.post('/api/jobs', (req, res) => {
 
   res.json({ success: true, job: newJob });
 });
+
+// Endpoint Keep-Alive chống ngủ đông trên Render Free Tier
+let detectedPublicOrigin = process.env.RENDER_EXTERNAL_URL || null;
+app.use((req, res, next) => {
+  if (!detectedPublicOrigin && req.get('host') && !req.get('host').includes('localhost')) {
+    const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+    const host = (req.headers['x-forwarded-host'] || req.get('host')).split(',')[0].trim();
+    detectedPublicOrigin = `${proto}://${host}`;
+  }
+  next();
+});
+
+app.get('/api/ping', (req, res) => {
+  res.json({ alive: true, time: new Date().toISOString() });
+});
+
+// Tự động ping chính mình mỗi 4 phút để Render không tắt server sau 15 phút đóng tab
+setInterval(() => {
+  const origin = process.env.RENDER_EXTERNAL_URL || detectedPublicOrigin;
+  if (origin) {
+    fetch(`${origin}/api/ping`).catch(() => {});
+  }
+}, 4 * 60 * 1000);
 
 // Lấy danh sách jobs
 app.get('/api/jobs', (req, res) => {
